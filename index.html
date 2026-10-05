@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <link rel="icon" type="image/png" href="PA.png">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audio / Video → Piano MIDI 高精度変換</title>
+<style>
+:root{--bg:#0b1020;--panel:#121a2d;--panel2:#18223a;--line:#2b3958;--text:#eef3ff;--muted:#9eabc4;--accent:#ff9f43;--good:#54d68a;--warn:#ffd166}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#080c18,#101a31);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1450px;margin:auto;padding:22px}.hero{padding:22px;border:1px solid var(--line);background:rgba(18,26,45,.9);border-radius:18px;margin-bottom:16px}
+h1{margin:0 0 8px;font-size:clamp(24px,4vw,40px)}p{color:var(--muted)}.grid{display:grid;grid-template-columns:360px 1fr;gap:16px}
+.panel{background:rgba(18,26,45,.94);border:1px solid var(--line);border-radius:16px;padding:16px}.panel h2{font-size:17px;margin:0 0 12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{min-width:0}
+label{display:block;color:var(--muted);font-size:12px;margin:12px 0 5px}
+input[type=file],select,input[type=number],input[type=range]{width:100%}
+input[type=file],select,input[type=number]{background:#0c1324;border:1px solid var(--line);color:var(--text);padding:9px;border-radius:9px}
+button{border:1px solid #3a496b;background:#1a2742;color:white;padding:10px 13px;border-radius:9px;cursor:pointer;font-weight:650}
+button:hover{filter:brightness(1.15)}button.primary{background:#b85d0a;border-color:#e68125}button.good{background:#17683f;border-color:#2b9c66}button:disabled{opacity:.45;cursor:not-allowed}
+.rangeLine{display:grid;grid-template-columns:1fr 64px;gap:8px;align-items:center}.rangeLine output{font-variant-numeric:tabular-nums;text-align:right;color:var(--accent)}
+.status{margin-top:10px;padding:10px;border-radius:10px;background:#0b1325;border:1px solid var(--line);font-size:13px}
+.progress{height:9px;background:#0a1020;border-radius:99px;overflow:hidden;margin-top:9px}.bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),#ffd166);transition:width .1s}
+canvas{width:100%;height:auto;background:#080d18;border:1px solid var(--line);border-radius:12px;display:block}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.stat{background:#0c1426;border:1px solid var(--line);padding:10px;border-radius:10px}.stat b{font-size:20px;display:block}.stat span{font-size:11px;color:var(--muted)}
+.help{font-size:12px;line-height:1.55;color:var(--muted)}.checks{display:grid;grid-template-columns:1fr 1fr;gap:7px}.checks label{margin:0;color:var(--text);font-size:12px}.checks input{width:auto}
+footer{color:#77839b;font-size:11px;margin-top:14px;line-height:1.5}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<section class="hero">
+<h1>🎹 Audio / Video → Piano MIDI</h1>
+<p>動画・音声ファイルをブラウザ内で解析し、ピアノ向けのノート列を推定して標準MIDIを書き出します。多音・ペダル・録音ノイズを想定したスペクトル解析、倍音抑制、オンセット検出、ノート統合を搭載。</p>
+</section>
+
+<div class="grid">
+<aside class="panel">
+<h2>1. ファイル</h2>
+<input id="file" type="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.webm,.mp4,.mov">
+<div class="row" style="margin-top:9px">
+<button id="analyze" class="primary" disabled>解析開始</button>
+<button id="stop" disabled>停止</button>
+</div>
+<div class="status" id="status">ファイルを選択してください。</div>
+<div class="progress"><div class="bar" id="bar"></div></div>
+
+<h2 style="margin-top:20px">2. 解析精度</h2>
+<label>解析品質</label>
+<select id="quality">
+<option value="fast">高速（長尺向け）</option>
+<option value="balanced" selected>高精度（推奨）</option>
+<option value="max">最高精度（重い）</option>
+</select>
+
+<label>最低音域</label>
+<div class="rangeLine"><input id="minNote" type="range" min="21" max="48" value="21"><output id="minOut">A0</output></div>
+<label>最高音域</label>
+<div class="rangeLine"><input id="maxNote" type="range" min="72" max="108" value="108"><output id="maxOut">C8</output></div>
+
+<label>検出感度</label>
+<div class="rangeLine"><input id="sens" type="range" min="0" max="100" value="52"><output id="sensOut">52</output></div>
+
+<label>想定する同時発音数</label>
+<select id="poly">
+<option>3</option><option selected>6</option><option>10</option><option>14</option>
+</select>
+
+<div class="checks" style="margin-top:12px">
+<label><input id="onset" type="checkbox" checked> オンセット補正</label>
+<label><input id="harm" type="checkbox" checked> 倍音抑制</label>
+<label><input id="cleanup" type="checkbox" checked> ノイズ除去</label>
+<label><input id="quant" type="checkbox"> 自動クオンタイズ</label>
+</div>
+
+<h2 style="margin-top:20px">3. 出力</h2>
+<div class="row">
+<button id="midi" class="good" disabled>MIDIを書き出す</button>
+<button id="json" disabled>JSON</button>
+<button id="csv" disabled>CSV</button>
+</div>
+<div class="row" style="margin-top:8px">
+<button id="play" disabled>解析音を再生</button>
+<button id="clear">クリア</button>
+</div>
+<p class="help">MIDIはType 1、480 ticks/quarter、推定テンポで生成します。音声そのものをMIDIに変換するのではなく、音高・開始・終了・ベロシティを推定します。</p>
+</aside>
+
+<main class="panel">
+<h2>解析結果 / ピアノロール</h2>
+<canvas id="roll" width="1200" height="560"></canvas>
+<div class="stats">
+<div class="stat"><b id="nNotes">0</b><span>検出ノート</span></div>
+<div class="stat"><b id="duration">0.0s</b><span>解析時間</span></div>
+<div class="stat"><b id="bpm">—</b><span>推定BPM</span></div>
+<div class="stat"><b id="conf">—</b><span>平均信頼度</span></div>
+</div>
+<h2 style="margin-top:18px">検出ログ</h2>
+<canvas id="wave" width="1200" height="180"></canvas>
+<footer>
+ブラウザ標準のWeb Audio APIを使用して音声をデコードし、OfflineAudioContext等で扱えるAudioBufferを解析します。Web Audio APIはブラウザ上の音声処理を行うための標準APIです。
+</footer>
+</main>
+</div>
+</div>
+
+<script>
+"use strict";
+
+/* =========================================================
+   Piano Audio → MIDI engine
+   - mono mixdown
+   - spectral flux onset
+   - harmonic-product/salience pitch estimation
+   - harmonic subtraction for polyphony
+   - temporal tracking / gap merging
+   - MIDI SMF type 1 writer
+   ========================================================= */
+
+const $=id=>document.getElementById(id);
+const fileEl=$("file"), analyzeBtn=$("analyze"), stopBtn=$("stop");
+const statusEl=$("status"), bar=$("bar"), roll=$("roll"), wave=$("wave");
+const minNote=$("minNote"),maxNote=$("maxNote"),sens=$("sens");
+const minOut=$("minOut"),maxOut=$("maxOut"),sensOut=$("sensOut");
+const midiBtn=$("midi"),jsonBtn=$("json"),csvBtn=$("csv"),playBtn=$("play");
+let file=null, buffer=null, result=null, abort=false, audioURL=null;
+
+const NOTE_NAMES=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+function noteName(n){return NOTE_NAMES[n%12]+(Math.floor(n/12)-1)}
+function hzToMidi(h){return 69+12*Math.log2(h/440)}
+function midiToHz(n){return 440*Math.pow(2,(n-69)/12)}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x))}
+function sleep(){return new Promise(r=>setTimeout(r,0))}
+function setStatus(s,p=null){statusEl.textContent=s;if(p!==null)bar.style.width=(p*100).toFixed(1)+"%"}
+function fmt(n){return Number(n).toFixed(2)}
+
+function fft(re,im){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){
+    let bit=n>>1; for(;j&bit;bit>>=1)j^=bit; j^=bit;
+    if(i<j){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t}
+  }
+  for(let len=2;len<=n;len<<=1){
+    const a=-2*Math.PI/len, c=Math.cos(a), s=Math.sin(a);
+    for(let i=0;i<n;i+=len){
+      let wr=1,wi=0, h=len>>1;
+      for(let j=0;j<h;j++){
+        const p=i+j,q=p+h;
+        const tr=wr*re[q]-wi*im[q], ti=wr*im[q]+wi*re[q];
+        re[q]=re[p]-tr; im[q]=im[p]-ti; re[p]+=tr; im[p]+=ti;
+        const nr=wr*c-wi*s; wi=wr*s+wi*c; wr=nr;
+      }
+    }
+  }
+}
+function magSpectrum(samples,N){
+  const re=new Float64Array(N),im=new Float64Array(N);
+  const L=Math.min(samples.length,N);
+  for(let i=0;i<L;i++){
+    // Hann
+    re[i]=samples[i]*(0.5-0.5*Math.cos(2*Math.PI*i/(N-1)));
+  }
+  fft(re,im);
+  const m=new Float64Array(N>>1);
+  for(let i=0;i<m.length;i++)m[i]=Math.hypot(re[i],im[i])/(N/2);
+  return m;
+}
+function parabolic(a,b,c){
+  const d=a-2*b+c;
+  return d===0?0:0.5*(a-c)/d;
+}
+function percentile(a,p){
+  if(!a.length)return 0;
+  const x=Array.from(a).sort((u,v)=>u-v), k=(x.length-1)*p;
+  const f=Math.floor(k),c=Math.ceil(k);
+  return x[f]+(x[c]-x[f])*(k-f);
+}
+
+function localPeak(m,k){
+  if(k<=0||k>=m.length-1)return m[k];
+  return m[k]+0.5*(m[k-1]-m[k+1])*0; // amplitude; frequency refined separately
+}
+
+/* Pitch salience: sum energy around fundamental and harmonics.
+   We deliberately score many MIDI candidates rather than relying on a
+   single autocorrelation peak; this handles piano harmonics better. */
+function pitchScores(m,sr,N,minM,maxM,harmonicSuppress){
+  const scores=[];
+  const maxBin=m.length-1;
+  const noise=percentile(m.slice(2,Math.min(maxBin,Math.floor(8000*N/sr))),.35)+1e-10;
+  for(let note=minM;note<=maxM;note++){
+    const f=midiToHz(note), ny=sr/2;
+    if(f>ny)continue;
+    let score=0, total=0;
+    for(let h=1;h<=12;h++){
+      const hf=f*h;if(hf>ny*.97)break;
+      const x=hf*N/sr, k=Math.round(x);
+      if(k<2||k>=maxBin-1)continue;
+      const d=clamp(Math.abs(x-k),0,1);
+      const amp=(1-d)*m[k]+(d?d*m[k+(x>k?1:-1)]:0);
+      const w=(1/Math.pow(h,.78))*Math.exp(-h*.018);
+      score+=amp*w;total+=w;
+    }
+    // Penalize candidates whose 2nd/3rd harmonics explain much more than fundamental.
+    const b=Math.round(f*N/sr);
+    const fundamental=m[clamp(b,1,maxBin-1)];
+    score=(score/Math.max(total,1))*0.8 + fundamental*0.2;
+    score/=noise;
+    if(harmonicSuppress){
+      const h2=m[clamp(Math.round(2*f*N/sr),0,maxBin-1)];
+      const h3=m[clamp(Math.round(3*f*N/sr),0,maxBin-1)];
+      score*=1/(1+0.10*(h2+h3)/Math.max(fundamental,1e-9));
+    }
+    scores.push({note,score});
+  }
+  return scores;
+}
+
+function onsetFlux(cur,prev){
+  let sum=0, norm=0;
+  const n=Math.min(cur.length,prev.length);
+  for(let i=2;i<n;i++){
+    const a=Math.log1p(cur[i]*1000),b=Math.log1p(prev[i]*1000);
+    sum+=Math.max(0,a-b);norm+=a;
+  }
+  return norm?sum/norm:0;
+}
+
+function downsample(arr,max=1400){
+  const step=Math.max(1,Math.floor(arr.length/max)),out=[];
+  for(let i=0;i<arr.length;i+=step){
+    let mx=0;
+    for(let j=i;j<Math.min(arr.length,i+step);j++)mx=Math.max(mx,Math.abs(arr[j]));
+    out.push(mx);
+  }
+  return out;
+}
+
+function drawWave(data){
+  const c=wave,ctx=c.getContext("2d"),w=c.width,h=c.height;
+  ctx.clearRect(0,0,w,h);ctx.strokeStyle="#344563";ctx.beginPath();ctx.moveTo(0,h/2);ctx.lineTo(w,h/2);ctx.stroke();
+  const d=downsample(data,1400);ctx.strokeStyle="#ff9f43";ctx.beginPath();
+  for(let i=0;i<d.length;i++){const x=i/(d.length-1)*w,y=h/2-d[i]*h*.43;if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y)}
+  ctx.stroke();
+}
+
+function drawRoll(notes){
+  const c=roll,ctx=c.getContext("2d"),w=c.width,h=c.height;
+  ctx.clearRect(0,0,w,h);ctx.fillStyle="#080d18";ctx.fillRect(0,0,w,h);
+  const dur=result?.duration||1, lo=+minNote.value,hi=+maxNote.value;
+  for(let n=lo;n<=hi;n++){
+    const y=h-(n-lo+1)/(hi-lo+1)*h;
+    ctx.strokeStyle=(n%12===0)?"#33415f":"#18233b";ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
+    if(n%12===0){ctx.fillStyle="#8390a9";ctx.font="10px system-ui";ctx.fillText(noteName(n),4,y-2)}
+  }
+  for(const x of notes){
+    const X=x.start/dur*w,W=Math.max(2,(x.end-x.start)/dur*w);
+    const Y=h-(x.note-lo+1)/(hi-lo+1)*h;
+    ctx.fillStyle=x.conf>.72?"#ff9f43":x.conf>.48?"#ffd166":"#6f88b8";
+    ctx.fillRect(X,Y-5,W,9);
+  }
+}
+
+function detectTempo(onsets,dur){
+  if(onsets.length<4)return 120;
+  const hist=new Float64Array(241);
+  for(let i=1;i<onsets.length;i++){
+    const d=onsets[i]-onsets[i-1];if(d<.18||d>1.5)continue;
+    for(let bpm=50;bpm<=190;bpm++){
+      const target=60/bpm;
+      const ratio=d/target, err=Math.abs(ratio-Math.round(ratio));
+      if(err<.08)hist[bpm]+=1-err/.08;
+    }
+  }
+  let best=120,score=-1;
+  for(let bpm=50;bpm<=190;bpm++)if(hist[bpm]>score){score=hist[bpm];best=bpm}
+  return best;
+}
+
+function mergeNotes(raw,dur){
+  raw.sort((a,b)=>a.note-b.note||a.start-b.start);
+  const out=[];
+  const by=new Map();
+  for(const n of raw){
+    const arr=by.get(n.note)||[];
+    let last=arr[arr.length-1];
+    if(last && n.start-last.end<.075 && n.conf>.22){
+      last.end=Math.max(last.end,n.end);last.conf=Math.max(last.conf,n.conf);last.vel=Math.max(last.vel,n.vel);
+    }else{const z={...n};arr.push(z);out.push(z)}
+    by.set(n.note,arr);
+  }
+  // Remove implausibly tiny notes unless very strong.
+  return out.filter(n=>(n.end-n.start>=.045)||n.conf>.84).filter(n=>n.end>0&&n.start<dur);
+}
+
+async function analyzeBuffer(buf){
+  const q=$("quality").value;
+  const N=q==="fast"?2048:q==="max"?8192:4096;
+  const hop=q==="fast"?1024:q==="max"?2048:1024;
+  const sr=buf.sampleRate, ch=buf.numberOfChannels, len=buf.length;
+  const mono=new Float32Array(len);
+  for(let c=0;c<ch;c++){
+    const d=buf.getChannelData(c), w=1/ch;
+    for(let i=0;i<len;i++)mono[i]+=d[i]*w;
+  }
+  drawWave(mono);
+  const dur=len/sr, lo=+minNote.value, hi=+maxNote.value;
+  const frames=Math.max(1,Math.floor((len-N)/hop));
+  const spectra=[];
+  const fluxes=[];
+  let prev=null;
+  for(let f=0;f<frames;f++){
+    if(abort)throw new Error("停止しました");
+    const pos=f*hop, frame=mono.subarray(pos,Math.min(pos+N,len));
+    const spec=magSpectrum(frame,N);
+    const fl=prev?onsetFlux(spec,prev):0;
+    spectra.push(spec);fluxes.push(fl);prev=spec;
+    if(f%12===0){setStatus(`スペクトル解析 ${f+1}/${frames} (${(pos/sr).toFixed(1)}s)`,f/frames*.55);await sleep()}
+  }
+  // Robust onset threshold: local adaptive baseline.
+  const sensFactor=.65 + (+sens.value)/100*1.0;
+  const onsets=[];
+  for(let i=2;i<fluxes.length-2;i++){
+    let base=0,cnt=0;
+    for(let j=Math.max(0,i-12);j<=Math.min(fluxes.length-1,i+12);j++){if(Math.abs(j-i)>2){base+=fluxes[j];cnt++}}
+    base/=Math.max(1,cnt);
+    if(fluxes[i]>base*sensFactor && fluxes[i]>=fluxes[i-1] && fluxes[i]>fluxes[i+1] && fluxes[i]>0.025){
+      const t=i*hop/sr;
+      if(!onsets.length||t-onsets.at(-1)>.055)onsets.push(t);
+    }
+  }
+  // Always make segment boundaries available so sustained notes can be tracked.
+  const tempo=detectTempo(onsets,dur);
+  const active=new Map(), raw=[], poly=+$("poly").value;
+  let prevTime=0;
+  for(let i=0;i<spectra.length;i++){
+    if(abort)throw new Error("停止しました");
+    const t=i*hop/sr;
+    const scores=pitchScores(spectra[i],sr,N,lo,hi,$("harm").checked)
+      .sort((a,b)=>b.score-a.score);
+    const noise=percentile(spectra[i].slice(2),.35)+1e-10;
+    const selected=[];
+    for(const s of scores){
+      if(selected.length>=poly)break;
+      // avoid choosing harmonic-related duplicate candidates
+      if(s.score<1.75)continue;
+      if(selected.some(x=>Math.abs(x.note-s.note)<=1))continue;
+      const fundamental=spectra[i][clamp(Math.round(midiToHz(s.note)*N/sr),1,spectra[i].length-1)];
+      const conf=clamp((s.score-1.2)/4.5,0,1);
+      if(fundamental/noise<1.3 && conf<.65)continue;
+      selected.push({...s,conf});
+    }
+    const activeNotes=new Set(selected.map(x=>x.note));
+    // close disappeared notes after a short grace period
+    for(const [note,a] of active){
+      if(!activeNotes.has(note)){
+        if(t-a.last>.10){
+          a.end=a.last+.035;
+          if(a.end-a.start>.04)raw.push({note,start:a.start,end:a.end,vel:a.vel,conf:a.conf});
+          active.delete(note);
+        }
+      }
+    }
+    for(const s of selected){
+      let a=active.get(s.note);
+      const vel=Math.round(clamp(28+s.conf*92,1,127));
+      if(!a){
+        // Ignore weak isolated frames unless near an onset.
+        const near=onsets.some(o=>Math.abs(o-t)<.075);
+        if(s.conf<.32 && !near)continue;
+        a={note:s.note,start:t,last:t,vel,conf:s.conf};active.set(s.note,a);
+      }else{
+        a.last=t;a.conf=.65*a.conf+.35*s.conf;a.vel=Math.max(a.vel,vel);
+      }
+    }
+    if(i%8===0){setStatus(`ノート推定 ${i+1}/${frames} (${t.toFixed(1)}s)`,.55+i/frames*.40);await sleep()}
+  }
+  for(const a of active.values()){
+    a.end=Math.min(dur,a.last+0.08);
+    if(a.end-a.start>.04)raw.push({note:a.note,start:a.start,end:a.end,vel:a.vel,conf:a.conf});
+  }
+  // Snap starts to detected onsets only when sufficiently close.
+  if($("onset").checked){
+    for(const n of raw){
+      let best=n.start,bd=.065;
+      for(const o of onsets){const d=Math.abs(o-n.start);if(d<bd){bd=d;best=o}}
+      n.start=best;
+    }
+  }
+  let notes=mergeNotes(raw,dur);
+  if($("cleanup").checked)notes=notes.filter(n=>n.conf>.28);
+  if($("quant").checked){
+    const beat=60/tempo, grid=beat/4;
+    for(const n of notes){
+      n.start=Math.max(0,Math.round(n.start/grid)*grid);
+      n.end=Math.max(n.start+grid/4,Math.round(n.end/grid)*grid);
+    }
+  }
+  setStatus(`完了：${notes.length}ノート`,1);
+  return {notes,duration:dur,bpm:tempo,sampleRate:sr};
+}
+
+function writeVar(n){
+  n=Math.max(0,Math.floor(n));const b=[n&127];n>>=7;
+  while(n){b.unshift((n&127)|128);n>>=7}
+  return b;
+}
+function u16(n){return[(n>>8)&255,n&255]}
+function u32(n){return[(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]}
+function strBytes(s){return Array.from(s).map(c=>c.charCodeAt(0)&255)}
+function makeMidi(res){
+  const TPQ=480, bpm=res.bpm||120, events=[];
+  for(const n of res.notes){
+    const on=Math.max(0,Math.round(n.start*bpm/60*TPQ));
+    const off=Math.max(on+1,Math.round(n.end*bpm/60*TPQ));
+    events.push({t:on,type:0x90,n:n.note,v:n.vel||80});
+    events.push({t:off,type:0x80,n:n.note,v:0});
+  }
+  events.sort((a,b)=>a.t-b.t || a.type-b.type);
+  const body=[];
+  body.push(...writeVar(0),0xFF,0x51,0x03,(60000000/bpm>>16)&255,(60000000/bpm>>8)&255,60000000/bpm&255);
+  body.push(...writeVar(0),0xFF,0x58,0x04,4,2,24,8);
+  let last=0;
+  for(const e of events){body.push(...writeVar(e.t-last),e.type,e.n,e.v);last=e.t}
+  body.push(...writeVar(0),0xFF,0x2F,0x00);
+  const header=[...strBytes("MThd"),...u32(6),...u16(1),...u16(1),...u16(TPQ)];
+  const track=[...strBytes("MTrk"),...u32(body.length),...body];
+  return new Blob([new Uint8Array([...header,...track])],{type:"audio/midi"});
+}
+function download(blob,name){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function resultJSON(){return JSON.stringify({format:"piano-midi-analysis-v1",duration:result.duration,bpm:result.bpm,sampleRate:result.sampleRate,notes:result.notes},null,2)}
+function resultCSV(){
+  const rows=["start,end,note,noteName,velocity,confidence"];
+  for(const n of result.notes)rows.push([n.start.toFixed(6),n.end.toFixed(6),n.note,noteName(n.note),n.vel,n.conf.toFixed(4)].join(","));
+  return rows.join("\n");
+}
+
+fileEl.onchange=async()=>{
+  file=fileEl.files[0];if(!file)return;
+  analyzeBtn.disabled=false;statusEl.textContent=`選択：${file.name} (${(file.size/1048576).toFixed(2)} MB)`;
+};
+analyzeBtn.onclick=async()=>{
+  if(!file)return;
+  abort=false;analyzeBtn.disabled=true;stopBtn.disabled=false;
+  midiBtn.disabled=jsonBtn.disabled=csvBtn.disabled=playBtn.disabled=true;
+  try{
+    setStatus("音声をデコード中…",.02);
+    const ac=new AudioContext();
+    const ab=await file.arrayBuffer();
+    buffer=await ac.decodeAudioData(ab);
+    await ac.close();
+    result=await analyzeBuffer(buffer);
+    $("nNotes").textContent=result.notes.length;
+    $("duration").textContent=result.duration.toFixed(1)+"s";
+    $("bpm").textContent=Math.round(result.bpm);
+    $("conf").textContent=(result.notes.length?result.notes.reduce((a,n)=>a+n.conf,0)/result.notes.length*100:0).toFixed(1)+"%";
+    drawRoll(result.notes);
+    midiBtn.disabled=jsonBtn.disabled=csvBtn.disabled=playBtn.disabled=false;
+  }catch(e){setStatus("エラー："+e.message);console.error(e)}
+  finally{analyzeBtn.disabled=false;stopBtn.disabled=true}
+};
+stopBtn.onclick=()=>{abort=true;setStatus("停止処理中…")};
+midiBtn.onclick=()=>result&&download(makeMidi(result),(file?.name||"converted").replace(/\.[^.]+$/,"")+".mid");
+jsonBtn.onclick=()=>result&&download(new Blob([resultJSON()],{type:"application/json"}),"piano-analysis.json");
+csvBtn.onclick=()=>result&&download(new Blob([resultCSV()],{type:"text/csv"}),"piano-notes.csv");
+playBtn.onclick=()=>{
+  if(!result||!buffer)return;
+  const ctx=new AudioContext(),src=ctx.createBufferSource();src.buffer=buffer;src.connect(ctx.destination);src.start();
+};
+$("clear").onclick=()=>{file=null;buffer=null;result=null;fileEl.value="";analyzeBtn.disabled=true;midiBtn.disabled=jsonBtn.disabled=csvBtn.disabled=playBtn.disabled=true;bar.style.width="0";statusEl.textContent="ファイルを選択してください。";$("nNotes").textContent="0";$("duration").textContent="0.0s";$("bpm").textContent="—";$("conf").textContent="—";drawRoll([]);drawWave(new Float32Array(0))};
+
+function updateLabels(){minOut.value=noteName(+minNote.value);maxOut.value=noteName(+maxNote.value);sensOut.value=sens.value}
+[minNote,maxNote,sens].forEach(x=>x.oninput=()=>{updateLabels();if(result)drawRoll(result.notes)});updateLabels();drawRoll([]);
+
+/* Resize-independent HiDPI-ish canvas backing dimensions are intentionally fixed
+   so the piano-roll timing does not change when CSS size changes. */
+</script>
+</body>
+</html>
